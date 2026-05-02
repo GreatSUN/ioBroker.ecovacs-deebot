@@ -302,12 +302,6 @@ class EcovacsDeebot extends utils.Adapter {
 
                     vacbot.on('ready', () => {
                         (async () => {
-                            // If the MQTT server was previously unreachable, any device coming
-                            // online means the server is available again - clear global state
-                            if (this.globalMqttUnreachable) {
-                                this.clearGlobalMqttUnreachable();
-                            }
-
                             try {
                                 await adapterObjects.createAdditionalObjects(this, ctx);
                                 await adapterObjects.createDeviceCapabilityObjects(this, ctx);
