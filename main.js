@@ -80,10 +80,7 @@ class EcovacsDeebot extends utils.Adapter {
                 if (ctx.vacbot) {
                     ctx.vacbot.disconnect();
                 }
-                if (ctx._autoUpdateTimeout) {
-                    clearTimeout(ctx._autoUpdateTimeout);
-                    ctx._autoUpdateTimeout = null;
-                }
+                this.stopPolling(ctx);
                 if (ctx.getGetPosInterval) {
                     clearInterval(ctx.getGetPosInterval);
                 }
@@ -323,6 +320,7 @@ class EcovacsDeebot extends utils.Adapter {
                             const isRetryInit = ctx.unreachableRetryCount > 0;
 
                             ctx.connected = true;
+                            this.updateDeviceConnectionState(ctx, true);
                             this.clearUnreachableRetry(ctx);
                             ctx.unreachableWarningSent = false;
                             this.updateConnectionState();
@@ -417,8 +415,7 @@ class EcovacsDeebot extends utils.Adapter {
                                 this.log.warn('Unhandled chargestatus: ' + status);
                             }
                             ctx.lastChargeStatus = status;
-                            // Reset the debounced auto-update timer on any state change
-                            this.scheduleAutoUpdate(ctx);
+
                         });
 
                         vacbot.on('CleanReport', (status) => {
@@ -449,8 +446,7 @@ class EcovacsDeebot extends utils.Adapter {
                                     this.setDeviceStatusByTrigger(ctx, 'cleanstatus');
                                     ctx.adapterProxy.setStateConditional('info.cleanstatus', status, true);
                                 }
-                                // Reset the debounced auto-update timer on any state change
-                                this.scheduleAutoUpdate(ctx);
+
                             } else if (status !== undefined) {
                                 this.log.warn('Unhandled cleanstatus: ' + status);
                             }
@@ -896,7 +892,7 @@ class EcovacsDeebot extends utils.Adapter {
                         });
 
                         vacbot.on('Evt', (obj) => {
-                            this.log.info('Evt message: ' + JSON.stringify(obj));
+                            this.log.debug('Evt message received');
                             // Any event from the device means it's reachable
                             this.handleDeviceDataReceived(ctx);
                         });
@@ -917,6 +913,8 @@ class EcovacsDeebot extends utils.Adapter {
                                     }
                                     this.clearUnreachableRetry(ctx);
                                     if (ctx.connected === false) {
+                                        ctx.connected = true;
+                                        this.updateDeviceConnectionState(ctx, true);
                                         this.setConnection(true);
                                     }
                                 } else if (obj.error && obj.error.includes('NODE_MODULE_VERSION') && obj.error.includes('canvas')) {
@@ -997,8 +995,20 @@ class EcovacsDeebot extends utils.Adapter {
                         });
 
                         vacbot.on('Position', (obj) => {
+                            // Throttle: process position updates at most once every 2 seconds
+                            // to avoid excessive state writes and area checks during active cleaning
+                            const now = Date.now();
+                            if (ctx._lastPositionTime && (now - ctx._lastPositionTime < 2000)) {
+                                // Still update the cached raw position values (cheap, no DB writes)
+                                // so they're available when the throttled update fires
+                                ctx._pendingPosition = obj;
+                                return;
+                            }
+                            ctx._lastPositionTime = now;
+                            const posObj = ctx._pendingPosition || obj;
+                            ctx._pendingPosition = null;
                             (async () => {
-                                await this.handlePositionObj(ctx, obj);
+                                await this.handlePositionObj(ctx, posObj);
                             })();
                         });
 
@@ -1021,35 +1031,35 @@ class EcovacsDeebot extends utils.Adapter {
                         });
 
                         vacbot.on('Maps', (maps) => {
-                            this.log.debug('Maps: ' + JSON.stringify(maps));
+                            this.log.debug('Maps received');
                             (async () => {
                                 await mapObjects.processMaps(this, ctx, maps);
                             })();
                         });
 
                         vacbot.on('MapSpotAreas', (areas) => {
-                            this.log.debug('MapSpotAreas: ' + JSON.stringify(areas));
+                            this.log.debug('SpotAreas received');
                             (async () => {
                                 await mapObjects.processSpotAreas(this, ctx, areas);
                             })();
                         });
 
                         vacbot.on('MapSpotAreaInfo', (area) => {
-                            this.log.debug('MapSpotAreaInfo: ' + JSON.stringify(area));
+                            this.log.debug('SpotAreaInfo received');
                             (async () => {
                                 await mapObjects.processSpotAreaInfo(this, ctx, area);
                             })();
                         });
 
                         vacbot.on('MapVirtualBoundaries', (boundaries) => {
-                            this.log.debug('MapVirtualBoundaries: ' + JSON.stringify(boundaries));
+                            this.log.debug('VirtualBoundaries received');
                             (async () => {
                                 await mapObjects.processVirtualBoundaries(this, ctx, boundaries);
                             })();
                         });
 
                         vacbot.on('MapVirtualBoundaryInfo', (boundary) => {
-                            this.log.debug('MapVirtualBoundaryInfo: ' + JSON.stringify(boundary));
+                            this.log.debug('VirtualBoundaryInfo received');
                             (async () => {
                                 await mapObjects.processVirtualBoundaryInfo(this, ctx, boundary);
                             })();
@@ -1108,7 +1118,7 @@ class EcovacsDeebot extends utils.Adapter {
                         });
 
                         vacbot.on('CleanLog', (json) => {
-                            this.log.debug('CleanLog: ' + JSON.stringify(json));
+                            this.log.debug('CleanLog received');
                             (async () => {
                                 const state = await ctx.adapterProxy.getStateAsync('cleaninglog.last20Logs');
                                 if (state) {
@@ -1572,15 +1582,21 @@ class EcovacsDeebot extends utils.Adapter {
                             this.log.silly('Received message: ' + value);
                             const timestamp = helper.getUnixTimestamp();
                             ctx.adapterProxy.setStateConditional('history.timestampOfLastMessageReceived', timestamp, true);
-                            ctx.adapterProxy.setStateConditional('history.dateOfLastMessageReceived', this.getCurrentDateAndTimeFormatted(), true);
-                            if (this.connectedTimestamp > 0) {
-                                const uptime = Math.floor((timestamp - this.connectedTimestamp) / 60);
-                                ctx.adapterProxy.setStateConditional('info.connectionUptime', uptime, true);
+                            // Throttle formatted date updates: only update every 60 seconds to reduce DB writes
+                            if (!ctx._lastFormattedDateUpdate || (timestamp - ctx._lastFormattedDateUpdate >= 60)) {
+                                ctx._lastFormattedDateUpdate = timestamp;
+                                ctx.adapterProxy.setStateConditional('history.dateOfLastMessageReceived', this.getCurrentDateAndTimeFormatted(), true);
+                            }
+                            if (ctx.connectedTimestamp > 0) {
+                                const uptime = Math.floor((timestamp - ctx.connectedTimestamp) / 60);
+                                // Only write uptime when it changes (minute-level precision)
+                                if (uptime !== ctx._lastUptimeValue) {
+                                    ctx._lastUptimeValue = uptime;
+                                    ctx.adapterProxy.setStateConditional('info.connectionUptime', uptime, true);
+                                }
                             }
                             // If device was previously unreachable, receiving any message means it's back
                             this.handleDeviceDataReceived(ctx);
-                            // Reset the debounced auto-update timer - any MQTT message prolongs the 30s window
-                            this.scheduleAutoUpdate(ctx);
                         });
 
                         vacbot.on('genericCommandPayload', (payload) => {
@@ -1594,6 +1610,7 @@ class EcovacsDeebot extends utils.Adapter {
                             const model = ctx.getModel().getProductName();
                             if (ctx.connected && error) {
                                 ctx.connected = false;
+                                this.updateDeviceConnectionState(ctx, false);
                                 this.updateConnectionState();
                                 ctx.connectionFailed = true;
                                 if (!ctx.unreachableWarningSent) {
@@ -1615,8 +1632,8 @@ class EcovacsDeebot extends utils.Adapter {
                         vacbot.connect();
                     }
 
-                    // Schedule debounced auto-update: polls after 30s of inactivity, reset on any event
-                    this.scheduleAutoUpdate(ctx);
+                    // Start fixed-interval polling
+                    this.startPolling(ctx);
                 }
             });
             this._connecting = false;
@@ -1640,14 +1657,12 @@ class EcovacsDeebot extends utils.Adapter {
         this.setStateConditional('info.connection', value, true);
         if (value === false) {
             for (const ctx of this.deviceContexts.values()) {
+                this.updateDeviceConnectionState(ctx, false);
                 if (ctx.retrypauseTimeout) {
                     clearTimeout(ctx.retrypauseTimeout);
                     ctx.retrypauseTimeout = null;
                 }
-                if (ctx._autoUpdateTimeout) {
-                    clearTimeout(ctx._autoUpdateTimeout);
-                    ctx._autoUpdateTimeout = null;
-                }
+                this.stopPolling(ctx);
                 if (ctx.getGetPosInterval) {
                     clearInterval(ctx.getGetPosInterval);
                     ctx.getGetPosInterval = null;
@@ -1670,6 +1685,19 @@ class EcovacsDeebot extends utils.Adapter {
         this.connected = anyConnected;
         if (anyConnected) {
             this.connectedTimestamp = helper.getUnixTimestamp();
+        }
+    }
+
+    updateDeviceConnectionState(ctx, value) {
+        ctx.adapterProxy.setStateConditional('info.connection', value, true);
+        if (value) {
+            ctx.connectedTimestamp = helper.getUnixTimestamp();
+            ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+            ctx._lastUptimeValue = 0;
+        } else {
+            ctx.connectedTimestamp = 0;
+            ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+            ctx._lastUptimeValue = 0;
         }
     }
 
@@ -1884,6 +1912,7 @@ class EcovacsDeebot extends utils.Adapter {
         // Mark device as connected
         ctx.connected = true;
         ctx.unreachableWarningSent = false;
+        this.updateDeviceConnectionState(ctx, true);
         this.updateConnectionState();
 
         // Re-fetch device states immediately since some may have been missed
@@ -1923,79 +1952,87 @@ class EcovacsDeebot extends utils.Adapter {
     async setInitialStateValues(ctx) {
         this.resetErrorStates(ctx);
         this.resetCurrentStats(ctx);
-        await ctx.adapterProxy.setStateConditionalAsync('info.library.debugMessage', '', true);
-        let state;
-        state = await ctx.adapterProxy.getStateAsync('info.cleanstatus');
-        if (state && state.val) {
-            ctx.cleanstatus = state.val.toString();
-        }
-        state = await ctx.adapterProxy.getStateAsync('info.chargestatus');
-        if (state && state.val) {
-            ctx.chargestatus = state.val.toString();
-        }
-        state = await ctx.adapterProxy.getStateAsync('map.currentMapMID');
-        if (state && state.val) {
-            ctx.currentMapID = state.val.toString();
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.customArea_cleanings');
-        if (state && state.val) {
-            ctx.customAreaCleanings = Number(state.val);
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.spotArea_cleanings');
-        if (state && state.val) {
-            ctx.spotAreaCleanings = Number(state.val);
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.waterLevel');
-        if (state && state.val) {
-            ctx.waterLevel = Math.round(Number(state.val));
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.cleanSpeed');
-        if (state && state.val) {
-            ctx.cleanSpeed = Math.round(Number(state.val));
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.pauseWhenEnteringSpotArea');
-        if (state && state.val) {
-            ctx.pauseWhenEnteringSpotArea = state.val.toString();
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.pauseWhenLeavingSpotArea');
-        if (state && state.val) {
-            ctx.pauseWhenLeavingSpotArea = state.val.toString();
-        }
-        state = await ctx.adapterProxy.getStateAsync('info.waterboxinfo');
-        if (state && state.val) {
-            ctx.waterboxInstalled = (state.val === true);
-        }
-        state = await ctx.adapterProxy.getStateAsync('map.chargePosition');
-        if (state && state.val) {
-            ctx.chargePosition = state.val;
-        }
-        state = await ctx.adapterProxy.getStateAsync('map.deebotPosition');
-        if (state && state.val) {
-            ctx.deebotPosition = state.val;
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.pauseBeforeDockingChargingStation');
-        if (state && state.val) {
-            ctx.pauseBeforeDockingChargingStation = (state.val === true);
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.pauseBeforeDockingChargingStation');
-        if (state && state.val) {
-            ctx.pauseBeforeDockingChargingStation = (state.val === true);
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.resetCleanSpeedToStandardOnReturn');
-        if (state && state.val) {
-            ctx.resetCleanSpeedToStandardOnReturn = (state.val === true);
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.cleaningClothReminder');
-        if (state && state.val) {
-            ctx.cleaningClothReminder.enabled = Boolean(Number(state.val));
-        }
-        state = await ctx.adapterProxy.getStateAsync('control.extended.cleaningClothReminder_period');
-        if (state && state.val) {
-            ctx.cleaningClothReminder.period = Number(state.val);
-        }
-        state = await ctx.adapterProxy.getStateAsync('info.extended.airDryingDateTime.startTimestamp');
-        if (state && state.val) {
-            ctx.airDryingStartTimestamp = Number(state.val);
+        // Fetch all initial states in parallel for performance
+        const stateKeys = [
+            'info.cleanstatus',
+            'info.chargestatus',
+            'map.currentMapMID',
+            'control.customArea_cleanings',
+            'control.spotArea_cleanings',
+            'control.waterLevel',
+            'control.cleanSpeed',
+            'control.extended.pauseWhenEnteringSpotArea',
+            'control.extended.pauseWhenLeavingSpotArea',
+            'info.waterboxinfo',
+            'map.chargePosition',
+            'map.deebotPosition',
+            'control.extended.pauseBeforeDockingChargingStation',
+            'control.extended.resetCleanSpeedToStandardOnReturn',
+            'control.extended.cleaningClothReminder',
+            'control.extended.cleaningClothReminder_period',
+            'info.extended.airDryingDateTime.startTimestamp'
+        ];
+
+        const results = await Promise.all(
+            stateKeys.map(key => ctx.adapterProxy.getStateAsync(key).catch(() => null))
+        );
+
+        // Apply results in same order as stateKeys array
+        for (let i = 0; i < stateKeys.length; i++) {
+            const state = results[i];
+            switch (stateKeys[i]) {
+                case 'info.cleanstatus':
+                    if (state && state.val) ctx.cleanstatus = state.val.toString();
+                    break;
+                case 'info.chargestatus':
+                    if (state && state.val) ctx.chargestatus = state.val.toString();
+                    break;
+                case 'map.currentMapMID':
+                    if (state && state.val) ctx.currentMapID = state.val.toString();
+                    break;
+                case 'control.customArea_cleanings':
+                    if (state && state.val) ctx.customAreaCleanings = Number(state.val);
+                    break;
+                case 'control.spotArea_cleanings':
+                    if (state && state.val) ctx.spotAreaCleanings = Number(state.val);
+                    break;
+                case 'control.waterLevel':
+                    if (state && state.val) ctx.waterLevel = Math.round(Number(state.val));
+                    break;
+                case 'control.cleanSpeed':
+                    if (state && state.val) ctx.cleanSpeed = Math.round(Number(state.val));
+                    break;
+                case 'control.extended.pauseWhenEnteringSpotArea':
+                    if (state && state.val) ctx.pauseWhenEnteringSpotArea = state.val.toString();
+                    break;
+                case 'control.extended.pauseWhenLeavingSpotArea':
+                    if (state && state.val) ctx.pauseWhenLeavingSpotArea = state.val.toString();
+                    break;
+                case 'info.waterboxinfo':
+                    if (state && state.val) ctx.waterboxInstalled = (state.val === true);
+                    break;
+                case 'map.chargePosition':
+                    if (state && state.val) ctx.chargePosition = state.val;
+                    break;
+                case 'map.deebotPosition':
+                    if (state && state.val) ctx.deebotPosition = state.val;
+                    break;
+                case 'control.extended.pauseBeforeDockingChargingStation':
+                    if (state && state.val) ctx.pauseBeforeDockingChargingStation = (state.val === true);
+                    break;
+                case 'control.extended.resetCleanSpeedToStandardOnReturn':
+                    if (state && state.val) ctx.resetCleanSpeedToStandardOnReturn = (state.val === true);
+                    break;
+                case 'control.extended.cleaningClothReminder':
+                    if (state && state.val) ctx.cleaningClothReminder.enabled = Boolean(Number(state.val));
+                    break;
+                case 'control.extended.cleaningClothReminder_period':
+                    if (state && state.val) ctx.cleaningClothReminder.period = Number(state.val);
+                    break;
+                case 'info.extended.airDryingDateTime.startTimestamp':
+                    if (state && state.val) ctx.airDryingStartTimestamp = Number(state.val);
+                    break;
+            }
         }
 
         await this.initLast20Errors(ctx);
@@ -2041,6 +2078,17 @@ class EcovacsDeebot extends utils.Adapter {
                 this.log.warn("setStateConditional: value for state id '" + stateId + "' is undefined");
                 return;
             }
+            const _dotIdx = stateId.indexOf('.');
+            if (_dotIdx > 0) {
+                const _deviceId = stateId.substring(0, _dotIdx);
+                const _cacheCtx = this.deviceContexts.get(_deviceId);
+                if (_cacheCtx && _cacheCtx._stateValues) {
+                    const _cachedVal = _cacheCtx._stateValues.get(stateId.substring(_dotIdx + 1));
+                    if (_cachedVal === value && !native) {
+                        return;
+                    }
+                }
+            }
             // Ensure object exists before setting state
             this.getObject(stateId, (err, obj) => {
                 if (err || !obj) {
@@ -2051,6 +2099,13 @@ class EcovacsDeebot extends utils.Adapter {
                     if (!err2) {
                         if (!state || (ack && !state.ack) || (state.val !== value) || native) {
                             this.setState(stateId, value, ack);
+                            if (_dotIdx > 0) {
+                                const _deviceId2 = stateId.substring(0, stateId.indexOf('.'));
+                                const _cacheCtx2 = this.deviceContexts.get(_deviceId2);
+                                if (_cacheCtx2 && _cacheCtx2._stateValues) {
+                                    _cacheCtx2._stateValues.set(stateId.substring(stateId.indexOf('.') + 1), value);
+                                }
+                            }
                             if (native) {
                                 this.extendObject(
                                     stateId, {
@@ -2074,6 +2129,17 @@ class EcovacsDeebot extends utils.Adapter {
                 this.log.warn("setStateConditionalAsync: value for state id '" + stateId + "' is undefined");
                 return;
             }
+            const _dotIdx2 = stateId.indexOf('.');
+            if (_dotIdx2 > 0) {
+                const _deviceId2 = stateId.substring(0, _dotIdx2);
+                const _cacheCtx2 = this.deviceContexts.get(_deviceId2);
+                if (_cacheCtx2 && _cacheCtx2._stateValues) {
+                    const _cachedVal2 = _cacheCtx2._stateValues.get(stateId.substring(_dotIdx2 + 1));
+                    if (_cachedVal2 === value && !native) {
+                        return;
+                    }
+                }
+            }
             // Ensure object exists before setting state
             const obj = await this.getObjectAsync(stateId);
             if (!obj) {
@@ -2083,6 +2149,13 @@ class EcovacsDeebot extends utils.Adapter {
             const state = await this.getStateAsync(stateId);
             if (!state || (ack && !state.ack) || (state.val !== value) || native) {
                 this.setState(stateId, value, ack);
+                if (_dotIdx2 > 0) {
+                    const _deviceId3 = stateId.substring(0, stateId.indexOf('.'));
+                    const _cacheCtx3 = this.deviceContexts.get(_deviceId3);
+                    if (_cacheCtx3 && _cacheCtx3._stateValues) {
+                        _cacheCtx3._stateValues.set(stateId.substring(stateId.indexOf('.') + 1), value);
+                    }
+                }
                 if (native) {
                     this.extendObject(
                         stateId, {
@@ -2151,23 +2224,25 @@ class EcovacsDeebot extends utils.Adapter {
         ctx.intervalQueue.runAll();
     }
 
-    /**
-     * Schedule a debounced auto-update of device states.
-     * The update runs after autoUpdateInterval (30s) of inactivity.
-     * Any event from the device resets the timer, keeping state fresh
-     * via push while guaranteeing states are never more than 30s stale.
-     * @param {object} ctx - DeviceContext
-     */
-    scheduleAutoUpdate(ctx) {
-        if (ctx._autoUpdateTimeout) {
-            clearTimeout(ctx._autoUpdateTimeout);
+    startPolling(ctx) {
+        if (ctx._autoUpdateInterval) {
+            return;
         }
-        ctx._autoUpdateTimeout = setTimeout(() => {
-            ctx._autoUpdateTimeout = null;
+        const interval = Math.max(this.pollingInterval, 60000);
+        ctx._autoUpdateInterval = setInterval(() => {
+            if (this.globalMqttUnreachable || ctx.connectionFailed || !ctx.connected) {
+                return;
+            }
             this.vacbotGetStatesInterval(ctx);
-            // After polling, schedule the next check
-            this.scheduleAutoUpdate(ctx);
-        }, this.autoUpdateInterval);
+        }, interval);
+        this.log.debug(ctx.deviceId + ' Polling every ' + (interval / 1000) + 's');
+    }
+
+    stopPolling(ctx) {
+        if (ctx._autoUpdateInterval) {
+            clearInterval(ctx._autoUpdateInterval);
+            ctx._autoUpdateInterval = null;
+        }
     }
 
     getDevice(ctx) {

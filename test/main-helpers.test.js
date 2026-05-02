@@ -245,6 +245,72 @@ describe('main.js - helper methods', () => {
         });
     });
 
+    describe('updateDeviceConnectionState', () => {
+        const AdapterClass = mockAdapterCore.Adapter;
+
+        it('should set per-device connection to true and reset uptime', () => {
+            const instance = new AdapterClass({});
+            const ctx = {
+                connected: false,
+                connectedTimestamp: 0,
+                _lastUptimeValue: 5,
+                adapterProxy: {
+                    setStateConditional: sinon.stub()
+                }
+            };
+
+            instance.updateDeviceConnectionState = function(ctx, value) {
+                ctx.adapterProxy.setStateConditional('info.connection', value, true);
+                if (value) {
+                    ctx.connectedTimestamp = 12345;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                } else {
+                    ctx.connectedTimestamp = 0;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                }
+            };
+
+            instance.updateDeviceConnectionState(ctx, true);
+            expect(ctx.adapterProxy.setStateConditional.calledWith('info.connection', true, true)).to.be.true;
+            expect(ctx.adapterProxy.setStateConditional.calledWith('info.connectionUptime', 0, true)).to.be.true;
+            expect(ctx.connectedTimestamp).to.equal(12345);
+            expect(ctx._lastUptimeValue).to.equal(0);
+        });
+
+        it('should set per-device connection to false and clear timestamp', () => {
+            const instance = new AdapterClass({});
+            const ctx = {
+                connected: true,
+                connectedTimestamp: 99999,
+                _lastUptimeValue: 10,
+                adapterProxy: {
+                    setStateConditional: sinon.stub()
+                }
+            };
+
+            instance.updateDeviceConnectionState = function(ctx, value) {
+                ctx.adapterProxy.setStateConditional('info.connection', value, true);
+                if (value) {
+                    ctx.connectedTimestamp = 12345;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                } else {
+                    ctx.connectedTimestamp = 0;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                }
+            };
+
+            instance.updateDeviceConnectionState(ctx, false);
+            expect(ctx.adapterProxy.setStateConditional.calledWith('info.connection', false, true)).to.be.true;
+            expect(ctx.adapterProxy.setStateConditional.calledWith('info.connectionUptime', 0, true)).to.be.true;
+            expect(ctx.connectedTimestamp).to.equal(0);
+            expect(ctx._lastUptimeValue).to.equal(0);
+        });
+    });
+
     describe('setConnection', () => {
         const AdapterClass = mockAdapterCore.Adapter;
 
@@ -257,6 +323,7 @@ describe('main.js - helper methods', () => {
                 this.setStateConditional('info.connection', value, true);
                 if (value === false) {
                     for (const ctx of this.deviceContexts.values()) {
+                        this.updateDeviceConnectionState(ctx, false);
                         if (ctx.retrypauseTimeout) {
                             clearTimeout(ctx.retrypauseTimeout);
                             ctx.retrypauseTimeout = null;
@@ -278,21 +345,40 @@ describe('main.js - helper methods', () => {
             expect(instance.connectedTimestamp).to.equal(12345);
         });
 
-        it('should clear intervals when setting connection to false', () => {
+        it('should clear intervals and per-device connection when setting connection to false', () => {
             const instance = new AdapterClass({});
             const ctx1 = {
                 retrypauseTimeout: setTimeout(() => {}, 10000),
                 getStatesInterval: setInterval(() => {}, 10000),
                 getGetPosInterval: setInterval(() => {}, 10000),
                 airDryingActiveInterval: null,
-                airDryingStartTimestamp: 0
+                airDryingStartTimestamp: 0,
+                connectedTimestamp: 99999,
+                _lastUptimeValue: 5,
+                adapterProxy: {
+                    setStateConditional: sinon.stub()
+                }
             };
             instance.deviceContexts.set('device1', ctx1);
+
+            instance.updateDeviceConnectionState = function(ctx, value) {
+                ctx.adapterProxy.setStateConditional('info.connection', value, true);
+                if (value) {
+                    ctx.connectedTimestamp = 12345;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                } else {
+                    ctx.connectedTimestamp = 0;
+                    ctx.adapterProxy.setStateConditional('info.connectionUptime', 0, true);
+                    ctx._lastUptimeValue = 0;
+                }
+            };
 
             instance.setConnection = function(value) {
                 this.setStateConditional('info.connection', value, true);
                 if (value === false) {
                     for (const ctx of this.deviceContexts.values()) {
+                        this.updateDeviceConnectionState(ctx, false);
                         if (ctx.retrypauseTimeout) {
                             clearTimeout(ctx.retrypauseTimeout);
                             ctx.retrypauseTimeout = null;
@@ -322,6 +408,9 @@ describe('main.js - helper methods', () => {
             expect(ctx1.getStatesInterval).to.be.null;
             expect(ctx1.getGetPosInterval).to.be.null;
             expect(instance.connected).to.be.false;
+            expect(ctx1.adapterProxy.setStateConditional.calledWith('info.connection', false, true)).to.be.true;
+            expect(ctx1.connectedTimestamp).to.equal(0);
+            expect(ctx1._lastUptimeValue).to.equal(0);
         });
     });
 
