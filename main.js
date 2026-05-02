@@ -90,6 +90,10 @@ class EcovacsDeebot extends utils.Adapter {
                 if (ctx.retrypauseTimeout) {
                     clearTimeout(ctx.retrypauseTimeout);
                 }
+                if (ctx._pendingErrorWriteTimeout) {
+                    clearTimeout(ctx._pendingErrorWriteTimeout);
+                    ctx._pendingErrorWriteTimeout = null;
+                }
             }
             if (this.globalMqttUnreachableTimeout) {
                 clearTimeout(this.globalMqttUnreachableTimeout);
@@ -911,6 +915,7 @@ class EcovacsDeebot extends utils.Adapter {
                                         this.updateDeviceConnectionState(ctx, true);
                                         this.setConnection(true);
                                     }
+                                    this.resetErrorStates(ctx);
                                 } else if (obj.error && obj.error.includes('NODE_MODULE_VERSION') && obj.error.includes('canvas')) {
                                     this.log.warn(obj.error);
                                 } else {
@@ -921,9 +926,7 @@ class EcovacsDeebot extends utils.Adapter {
                                     // Mark all devices unreachable globally with a single log message.
                                     if (obj.error && obj.error.includes('MQTT server is offline or not reachable')) {
                                         this.setGlobalMqttUnreachable(ctx);
-                                        ctx.errorCode = obj.code;
-                                        ctx.adapterProxy.setStateConditional('info.errorCode', obj.code, true);
-                                        ctx.adapterProxy.setStateConditional('info.error', obj.error, true);
+                                        this.debouncedSetError(ctx, obj.code, obj.error);
                                         return; // handled globally, skip per-device processing below
                                     }
 
@@ -943,9 +946,7 @@ class EcovacsDeebot extends utils.Adapter {
                                     ctx.connectionFailed = true;
                                     this.scheduleUnreachableRetry(ctx);
                                 }
-                                ctx.errorCode = obj.code;
-                                ctx.adapterProxy.setStateConditional('info.errorCode', obj.code, true);
-                                ctx.adapterProxy.setStateConditional('info.error', obj.error, true);
+                                this.debouncedSetError(ctx, obj.code, obj.error);
                             }
                         });
 
@@ -1933,9 +1934,25 @@ class EcovacsDeebot extends utils.Adapter {
     }
 
     resetErrorStates(ctx) {
+        if (ctx._pendingErrorWriteTimeout) {
+            clearTimeout(ctx._pendingErrorWriteTimeout);
+            ctx._pendingErrorWriteTimeout = null;
+        }
         ctx.errorCode = '0';
         ctx.adapterProxy.setStateConditional('info.errorCode', ctx.errorCode, true);
         ctx.adapterProxy.setStateConditional('info.error', 'NoError: Robot is operational', true);
+    }
+
+    debouncedSetError(ctx, code, error) {
+        if (ctx._pendingErrorWriteTimeout) {
+            clearTimeout(ctx._pendingErrorWriteTimeout);
+        }
+        ctx.errorCode = code;
+        ctx._pendingErrorWriteTimeout = setTimeout(() => {
+            ctx._pendingErrorWriteTimeout = null;
+            ctx.adapterProxy.setStateConditional('info.errorCode', ctx.errorCode, true);
+            ctx.adapterProxy.setStateConditional('info.error', error, true);
+        }, 5000);
     }
 
     clearGoToPosition(ctx) {
