@@ -233,7 +233,7 @@ class EcovacsDeebot extends utils.Adapter {
         this.connect();
     }
 
-    connect() {
+    async connect() {
         if (this._connecting) {
             this.log.debug('Connection already in progress, skipping concurrent connect()');
             return;
@@ -305,20 +305,18 @@ class EcovacsDeebot extends utils.Adapter {
 
                     eventHandlers.registerReadyEvent(this, vacbot, ctx, vacuum);
 
-                        eventHandlers.registerChargeStateEvent(this, vacbot, ctx);
+                    eventHandlers.registerChargeStateEvent(this, vacbot, ctx);
 
-                        eventHandlers.registerCleanReportEvent(this, vacbot, ctx);
+                    eventHandlers.registerCleanReportEvent(this, vacbot, ctx);
 
-                        eventHandlers.registerWaterCleaningEvents(this, vacbot, ctx);
-                        eventHandlers.registerStationEvents(this, vacbot, ctx);
+                    eventHandlers.registerWaterCleaningEvents(this, vacbot, ctx);
+                    eventHandlers.registerStationEvents(this, vacbot, ctx);
 
-                        eventHandlers.registerMiscEventHandlers(this, vacbot, ctx);
-                        eventHandlers.registerConsumableEvents(this, vacbot, ctx);
-                        eventHandlers.registerConnectionEvents(this, vacbot, ctx);
-                        eventHandlers.registerMapEvents(this, vacbot, ctx);
-                        eventHandlers.registerAirbotEvents(this, vacbot, ctx);
-
-
+                    eventHandlers.registerMiscEventHandlers(this, vacbot, ctx);
+                    eventHandlers.registerConsumableEvents(this, vacbot, ctx);
+                    eventHandlers.registerConnectionEvents(this, vacbot, ctx);
+                    eventHandlers.registerMapEvents(this, vacbot, ctx);
+                    eventHandlers.registerAirbotEvents(this, vacbot, ctx);
 
 
 
@@ -365,30 +363,29 @@ class EcovacsDeebot extends utils.Adapter {
 
 
 
-                        // ==================================
-                        // OTA / Firmware Update Status
-                        // ==================================
 
 
-                        /**
+                    // ==================================
+                    // OTA / Firmware Update Status
+                    // ==================================
+
+
+                    /**
                      * @deprecated
                      */
-                        if ((!ctx.getGetPosInterval) && ctx.getModel().usesXmpp()) {
-                            if ((ctx.getModel().isSupportedFeature('map.deebotPosition'))) {
-                                ctx.getGetPosInterval = setInterval(() => {
-                                    if (ctx.getDevice().isCleaning() || ctx.getDevice().isReturning()) {
-                                        vacbot.run('GetPosition');
-                                    }
-                                }, 3000);
-                            }
+                    if ((!ctx.getGetPosInterval) && ctx.getModel().usesXmpp()) {
+                        if ((ctx.getModel().isSupportedFeature('map.deebotPosition'))) {
+                            ctx.getGetPosInterval = setInterval(() => {
+                                if (ctx.getDevice().isCleaning() || ctx.getDevice().isReturning()) {
+                                    vacbot.run('GetPosition');
+                                }
+                            }, 3000);
                         }
+                    }
 
-                        // ==================================
-                        // AIRBOT Z1 / Z1 Air Quality Monitor
-                        // ==================================
-
-
-
+                    // ==================================
+                    // AIRBOT Z1 / Z1 Air Quality Monitor
+                    // ==================================
 
 
 
@@ -397,13 +394,15 @@ class EcovacsDeebot extends utils.Adapter {
 
 
 
-                        // ==================
-                        // Library connection
-                        // ==================
 
 
 
-                    });
+                    // ==================
+                    // Library connection
+                    // ==================
+
+
+
 
                     // Skip connecting this device if MQTT server is known to be unreachable
                     // The global retry mechanism will connect all devices when server is back
