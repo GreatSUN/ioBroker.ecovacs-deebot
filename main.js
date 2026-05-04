@@ -5,6 +5,7 @@ const ecovacsDeebot = require('ecovacs-deebot');
 const nodeMachineId = require('node-machine-id');
 const adapterObjects = require('./lib/adapterObjects');
 const adapterCommands = require('./lib/adapterCommands');
+const C = require('./lib/constants');
 const helper = require('./lib/adapterHelper');
 const Model = require('./lib/deebotModel');
 const Device = require('./lib/device');
@@ -12,6 +13,7 @@ const DeviceContext = require('./lib/deviceContext');
 const RequestThrottle = require('./lib/requestThrottle');
 const EcoVacsAPI = ecovacsDeebot.EcoVacsAPI;
 const mapObjects = require('./lib/mapObjects');
+const eventHandlers = require('./lib/eventHandlers');
 const mapHelper = require('./lib/mapHelper');
 
 class EcovacsDeebot extends utils.Adapter {
@@ -103,6 +105,7 @@ class EcovacsDeebot extends utils.Adapter {
             this.log.info('cleaned everything up...');
             callback();
         } catch (e) {
+            this.log.error('Error during unload: ' + e.message);
             callback();
         }
     }
@@ -193,13 +196,9 @@ class EcovacsDeebot extends utils.Adapter {
             return;
         }
         const subPath = parts.slice(1).join('.');
-        (async () => {
-            try {
-                await adapterCommands.handleStateChange(this, ctx, subPath, state);
-            } catch (e) {
-                this.log.error(`Error handling state change for id '${id}' with value '${state.val}': '${e}'`);
-            }
-        })();
+        ctx._stateChangePromise = (ctx._stateChangePromise || Promise.resolve()).then(() =>
+            adapterCommands.handleStateChange(this, ctx, subPath, state)
+        ).catch(e => this.log.error(`Error handling state change for id '${id}' with value '${state.val}': '${e}'`));
     }
 
     reconnect() {
@@ -209,7 +208,7 @@ class EcovacsDeebot extends utils.Adapter {
         }
         const now = Date.now();
         // Increased cooldown to 60s to prevent rapid reconnection loops
-        if (this._lastReconnectTime && (now - this._lastReconnectTime < 60000)) {
+        if (this._lastReconnectTime && (now - this._lastReconnectTime < C.RECONNECT_COOLDOWN_MS)) {
             this.log.debug('Reconnect skipped - cooldown active (' + Math.round((now - this._lastReconnectTime) / 1000) + 's since last reconnect, minimum 60s)');
             return;
         }
@@ -247,7 +246,7 @@ class EcovacsDeebot extends utils.Adapter {
             this._connecting = false;
             return;
         }
-        if (this.config.pollingInterval && (Number(this.config.pollingInterval) >= 60000)) {
+        if (this.config.pollingInterval && (Number(this.config.pollingInterval) >= C.MIN_POLLING_INTERVAL_MS)) {
             this.pollingInterval = Number(this.config.pollingInterval);
         }
 
@@ -263,8 +262,8 @@ class EcovacsDeebot extends utils.Adapter {
             }
 
             const api = new EcoVacsAPI(deviceId, this.config.countrycode, continent, authDomain);
-            api.connect(this.config.email, password_hash).then(() => {
-            api.devices().then(async (devices) => {
+            await api.connect(this.config.email, password_hash);
+            const devices = await api.devices();
 
                 const numberOfDevices = Object.keys(devices).length;
                 if (numberOfDevices === 0) {
@@ -304,962 +303,72 @@ class EcovacsDeebot extends utils.Adapter {
                         this.log.error("Error creating initial objects for " + deviceId + ": " + e.message);
                     }
 
-                    vacbot.on('ready', () => {
-                        (async () => {
-                            try {
-                                await adapterObjects.createAdditionalObjects(this, ctx);
-                                await adapterObjects.createDeviceCapabilityObjects(this, ctx);
-                                await adapterObjects.createStationObjects(this, ctx);
-                            } catch (e) {
-                                this.log.error('Error creating additional objects for ' + ctx.deviceId + ': ' + e.message);
-                            }
-
-                            // Determine if this is a retry initialization before clearing the counter
-                            const isRetryInit = ctx.unreachableRetryCount > 0;
-
-                            ctx.connected = true;
-                            this.updateDeviceConnectionState(ctx, true);
-                            this.clearUnreachableRetry(ctx);
-                            ctx.unreachableWarningSent = false;
-                            this.updateConnectionState();
-
-                        const nick = vacuum.nick ? vacuum.nick : 'New Device ' + ctx.deviceId;
-                        if (isRetryInit) {
-                            this.log.debug(`Retry init for '${nick}'`);
-                        } else {
-                            this.log.info(`Instance for '${nick}' successfully initialized`);
-                        }
-
-                        ctx.adapterProxy.setStateConditional('info.version', this.version, true);
-                        ctx.adapterProxy.setStateConditional('info.library.version', api.getVersion(), true);
-                        ctx.adapterProxy.setStateConditional('info.library.canvasModuleIsInstalled', this.canvasModuleIsInstalled, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceName', nick, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceClass', ctx.getModel().getDeviceClass(), true);
-                        ctx.adapterProxy.setStateConditional('info.deviceModel', ctx.getModel().getProductName(), true);
-                        ctx.adapterProxy.setStateConditional('info.modelType', ctx.getModelType(), true);
-                        ctx.adapterProxy.setStateConditional('info.deviceType', ctx.getModel().getDeviceType(), true);
-                        await ctx.adapterProxy.createObjectNotExists(
-                            'info.deviceCapabilities', 'Device capabilities (JSON)',
-                            'json', 'json', false, '{}', '');
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities', JSON.stringify(ctx.getModel().getDeviceCapabilities()), true);
-                        const deviceCapabilities = ctx.getModel().getDeviceCapabilities();
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.type', deviceCapabilities.type, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasMapping', deviceCapabilities.hasMapping, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasWaterBox', deviceCapabilities.hasWaterBox, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasAirDrying', deviceCapabilities.hasAirDrying, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasAutoEmpty', deviceCapabilities.hasAutoEmpty, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasSpotAreas', deviceCapabilities.hasSpotAreas, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasVirtualBoundaries', deviceCapabilities.hasVirtualBoundaries, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasContinuousCleaning', deviceCapabilities.hasContinuousCleaning, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasDoNotDisturb', deviceCapabilities.hasDoNotDisturb, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasVoiceAssistant', deviceCapabilities.hasVoiceAssistant, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasCleaningStation', deviceCapabilities.hasCleaningStation, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceCapabilities.hasFloorWashing', deviceCapabilities.hasFloorWashing, true);
-                        ctx.adapterProxy.setStateConditional('info.deviceImageURL', ctx.getModel().getProductImageURL(), true);
-                        ctx.adapterProxy.setStateConditional('info.library.communicationProtocol', ctx.getModel().getProtocol(), true);
-                        ctx.adapterProxy.setStateConditional('info.library.deviceIs950type', ctx.getModel().is950type(), true);
-                        if (!isRetryInit) {
-                            this.log.info(`Library version: ${api.getVersion()}`);
-                            this.log.info(`Product name: ${ctx.getModel().getProductName()}`);
-                        }
-                        ctx.retries = 0;
-
-                            try {
-                                await this.setInitialStateValues(ctx);
-                            } catch (e) {
-                                this.log.error('Error setting initial state values for ' + ctx.deviceId + ': ' + e.message);
-                            }
-
-                            // Run initial get commands after a short delay to ensure
-                            // all event listeners are registered before responses arrive
-                            setTimeout(() => {
-                                this.vacbotInitialGetStates(ctx);
-                            }, 6000);
-                        })();
-
-                        vacbot.on('ChargeState', (status) => {
-                            this.log.debug(`[queue] Received ChargeState event: ${status}`);
-                            if (helper.isValidChargeStatus(status)) {
-                                if ((status === 'returning') && (ctx.cleaningQueue.notEmpty()) && (ctx.lastChargeStatus !== status)) {
-                                    ctx.cleaningQueue.startNextItemFromQueue();
-                                    setTimeout(() => {
-                                        ctx.lastChargeStatus = '';
-                                        this.log.debug('[queue] Reset lastChargingStatus');
-                                    }, 3000);
-                                } else if (ctx.chargestatus !== status) {
-                                    ctx.chargestatus = status;
-                                    this.setDeviceStatusByTrigger(ctx, 'chargestatus');
-                                    ctx.adapterProxy.setStateConditional('info.chargestatus', ctx.chargestatus, true);
-                                    if (ctx.chargestatus === 'charging') {
-                                        ctx.adapterProxy.setStateConditional('history.timestampOfLastStartCharging', helper.getUnixTimestamp(), true);
-                                        ctx.adapterProxy.setStateConditional('history.dateOfLastStartCharging', this.getCurrentDateAndTimeFormatted(), true);
-                                        ctx.currentSpotAreaData = {
-                                            'spotAreaID': 'unknown',
-                                            'lastTimeEnteredTimestamp': 0
-                                        };
-                                        this.resetErrorStates(ctx);
-                                        ctx.intervalQueue.addGetLifespan();
-                                        ctx.cleaningLogAcknowledged = false;
-                                        ctx.intervalQueue.addGetCleanLogs();
-                                        if (ctx.getModel().isMappingSupported()) {
-                                            ctx.intervalQueue.add('GetMaps');
-                                        }
-                                        if (ctx.getModel().isSupportedFeature('map.deebotPosition')) {
-                                            ctx.intervalQueue.add('GetPosition');
-                                        }
-                                    }
-                                }
-                            } else {
-                                this.log.warn('Unhandled chargestatus: ' + status);
-                            }
-                            ctx.lastChargeStatus = status;
-
-                        });
-
-                        vacbot.on('CleanReport', (status) => {
-                            this.log.debug(`[queue] Received CleanReport event: ${status}`);
-                            if (helper.isValidCleanStatus(status)) {
-                                if ((ctx.cleanstatus === 'setLocation') && (status !== 'setLocation')) {
-                                    if (status === 'idle') {
-                                        this.log.info('Bot arrived at destination');
-                                    } else {
-                                        this.log.info(`The operation was interrupted before arriving at destination (status: ${status})`);
-                                    }
-                                    this.handleSilentApproach(ctx);
-                                }
-                                if (ctx.getDevice().isNotStopped() && (ctx.cleanstatus !== status)) {
-                                    if ((status === 'stop') || (status === 'idle')) {
-                                        this.resetCurrentStats(ctx);
-                                        ctx.cleaningLogAcknowledged = false;
-                                        ctx.intervalQueue.addGetCleanLogs();
-                                    }
-                                    this.setPauseBeforeDockingIfWaterboxInstalled(ctx).catch(e => this.log.warn('setPauseBeforeDocking: ' + e));
-                                }
-                                // Do not overwrite drying/washing state from StationState.
-                                // CleanReport reflects the cleaning cycle state (e.g. 'idle' when done),
-                                // but the robot may be actively drying or washing mop pads at the station.
-                                // StationState is the authoritative source for these states.
-                                if ((ctx.cleanstatus !== 'drying') && (ctx.cleanstatus !== 'washing')) {
-                                    ctx.cleanstatus = status;
-                                    this.setDeviceStatusByTrigger(ctx, 'cleanstatus');
-                                    ctx.adapterProxy.setStateConditional('info.cleanstatus', status, true);
-                                }
-
-                            } else if (status !== undefined) {
-                                this.log.warn('Unhandled cleanstatus: ' + status);
-                            }
-                        });
-
-                        vacbot.on('WaterLevel', (level) => {
-                            if (level === undefined || level === null) return;
-                            ctx.waterLevel = level;
-                            adapterObjects.createControlWaterLevelIfNotExists(this, ctx, 0, 'control.waterLevel_standard', 'Water level if no other value is set').then(() => {
-                                adapterObjects.createControlWaterLevelIfNotExists(this, ctx, ctx.waterLevel).then(() => {
-                                    ctx.adapterProxy.setStateConditional('control.waterLevel', ctx.waterLevel, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('WaterBoxInfo', (value) => {
-                            ctx.waterboxInstalled = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('info.waterbox', ctx.waterboxInstalled, true);
-                        });
-
-                        vacbot.on('CarpetPressure', (value) => {
-                            if (ctx.getModel().isSupportedFeature('control.autoBoostSuction')) {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'control.extended.autoBoostSuction', 'Auto boost suction',
-                                    'boolean', 'value', true, false, '').then(() => {
-                                    const carpetPressure = Boolean(Number(value));
-                                    ctx.adapterProxy.setStateConditional('control.extended.autoBoostSuction', carpetPressure, true);
-                                });
-                            }
-                        });
-
-                        vacbot.on('CleanPreference', (value) => {
-                            if (ctx.getModel().isModelTypeAirbot()) return;
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.cleanPreference', 'Clean preference',
-                                'boolean', 'value', true, false, '').then(() => {
-                                const cleanPreference = Boolean(Number(value));
-                                ctx.cleanPreference = cleanPreference;
-                                ctx.adapterProxy.setStateConditional('control.extended.cleanPreference', cleanPreference, true);
-                            });
-                        });
-
-                        vacbot.on('VoiceAssistantState', (value) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.voiceAssistant', 'Indicates whether YIKO voice assistant is enabled',
-                                'boolean', 'value', true, Boolean(value), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.voiceAssistant', Boolean(value), true);
-                            });
-                        });
-
-                        vacbot.on('BorderSpin', (value) => {
-                            this.createInfoExtendedChannelNotExists(ctx).then(() => {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'control.extended.edgeDeepCleaning', 'Enable and disable edge deep cleaning',
-                                    'boolean', 'value', true, false, '').then(() => {
-                                    const edgeDeepCleaning = Boolean(Number(value));
-                                    ctx.adapterProxy.setStateConditional('control.extended.edgeDeepCleaning', edgeDeepCleaning, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('MopOnlyMode', (value) => {
-                            this.createInfoExtendedChannelNotExists(ctx).then(() => {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'control.extended.mopOnlyMode', 'Enable and disable mop only mode',
-                                    'boolean', 'value', true, false, '').then(() => {
-                                    const mopOnlyMode = Boolean(Number(value));
-                                    ctx.adapterProxy.setStateConditional('control.extended.mopOnlyMode', mopOnlyMode, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('SweepMode', (value) => {
-                            (async () => {
-                                await this.handleSweepMode(ctx, value);
-                            })();
-                        });
-
-                        vacbot.on('AirDryingState', (value) => {
-                            this.createInfoExtendedChannelNotExists(ctx).then(() => {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.airDryingState', 'Air drying state',
-                                    'string', 'value', false, '', '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.extended.airDryingState', value, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('WashInterval', (value) => {
-                            (async () => {
-                                await this.createInfoExtendedChannelNotExists(ctx);
-                                await ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.washInterval', 'Wash interval',
-                                    'number', 'value', false, 0, 'min');
-                                await ctx.adapterProxy.setStateConditionalAsync('info.extended.washInterval', value, true);
-                                await adapterObjects.createControlWashIntervalIfNotExists(this, ctx);
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.washInterval', value, true);
-                            })();
-                        });
-
-                        vacbot.on('WorkMode', (value) => {
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.extended.cleaningMode', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Cleaning Mode',
-                                        'type': 'number',
-                                        'role': 'level',
-                                        'read': true,
-                                        'write': true,
-                                        'min': 0,
-                                        'max': 3,
-                                        'def': value,
-                                        'unit': '',
-                                        'states': {
-                                            0: 'vacuum and mop',
-                                            1: 'vacuum only',
-                                            2: 'mop only',
-                                            3: 'mop after vacuum'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.cleaningMode', value, true);
-                            })();
-                        });
-
-                        vacbot.on('CarpetInfo', (value) => {
-                            if (value === undefined || value === null) return;
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.extended.carpetCleaningStrategy', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Carpet cleaning strategy',
-                                        'type': 'number',
-                                        'role': 'level',
-                                        'read': true,
-                                        'write': true,
-                                        'min': 0,
-                                        'max': 2,
-                                        'def': value,
-                                        'unit': '',
-                                        'states': {
-                                            0: 'auto',
-                                            1: 'bypass',
-                                            2: 'include'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.carpetCleaningStrategy', value, true);
-                            })();
-                        });
-
-                        vacbot.on('StationState', (object) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.airDrying', 'Start and stop air-drying mopping pads',
-                                'boolean', 'button', true, false, '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.airDrying', object.isAirDrying, true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.selfCleaning', 'Start and stop cleaning mopping pads',
-                                'boolean', 'button', true, false, '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.selfCleaning', object.isSelfCleaning, true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'info.extended.selfCleaningActive', 'Indicates whether the self-cleaning process is active',
-                                'boolean', 'value', false, false, '').then(() => {
-                                ctx.adapterProxy.setStateConditional('info.extended.selfCleaningActive', object.isSelfCleaning, true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'info.extended.cleaningStationActive', 'Indicates whether the self cleaning process is active',
-                                'boolean', 'value', false, false, '').then(() => {
-                                ctx.adapterProxy.setStateConditional('info.extended.cleaningStationActive', object.isActive, true);
-                            });
-                            this.handleAirDryingActive(ctx, object.isAirDrying);
-
-                            // Reflect air drying and self-cleaning state in device status.
-                            // The T80/T20 report these through StationState rather than CleanReport,
-                            // so we must update cleanstatus/deviceStatus here to avoid getting stuck
-                            // on 'charging' when the robot is actually drying or washing mop pads.
-                            if (object.isAirDrying) {
-                                ctx.cleanstatus = 'drying';
-                                this.setDeviceStatusByTrigger(ctx, 'cleanstatus');
-                                ctx.adapterProxy.setStateConditional('info.cleanstatus', 'drying', true);
-                            } else if (object.isSelfCleaning) {
-                                ctx.cleanstatus = 'washing';
-                                this.setDeviceStatusByTrigger(ctx, 'cleanstatus');
-                                ctx.adapterProxy.setStateConditional('info.cleanstatus', 'washing', true);
-                            } else if ((ctx.cleanstatus === 'drying') || (ctx.cleanstatus === 'washing')) {
-                                // Drying/washing ended; revert to idle so setStatusByTrigger
-                                // can correctly combine with chargestatus (e.g. 'charging')
-                                ctx.cleanstatus = 'idle';
-                                this.setDeviceStatusByTrigger(ctx, 'cleanstatus');
-                                ctx.adapterProxy.setStateConditional('info.cleanstatus', 'idle', true);
-                            }
-                        });
-
-                        vacbot.on('DryingDuration', (value) => {
-                            this.createAirDryingStates(ctx).then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.airDryingDuration', value, true);
-                            });
-                        });
-
-                        vacbot.on('AICleanItemState', (object) => {
-                            this.createInfoExtendedChannelNotExists(ctx).then(() => {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.particleRemoval', 'Indicates whether the particle removal mode is enabled',
-                                    'boolean', 'value', false, false, '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.extended.particleRemoval', object.particleRemoval, true);
-                                });
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.petPoopAvoidance', 'Indicates whether the pet poop avoidance mode is enabled',
-                                    'boolean', 'value', false, false, '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.extended.petPoopAvoidance', object.petPoopPrevention, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('StationInfo', (object) => {
-                            this.createInfoExtendedChannelNotExists(ctx).then(() => {
-                                ctx.adapterProxy.createChannelNotExists('info.extended.cleaningStation', 'Information about the cleaning station').then(() => {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.extended.cleaningStation.state', 'State of the cleaning station',
-                                        'number', 'value', false, object.state, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.extended.cleaningStation.state', object.state, true);
-                                    });
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.extended.cleaningStation.name', 'Name of the cleaning station',
-                                        'string', 'value', false, object.name, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.extended.cleaningStation.name', object.name, true);
-                                    });
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.extended.cleaningStation.model', 'Model of the cleaning station',
-                                        'string', 'value', false, object.model, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.extended.cleaningStation.model', object.model, true);
-                                    });
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.extended.cleaningStation.serialNumber', 'Serial number of the cleaning station',
-                                        'string', 'value', false, object.sn, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.extended.cleaningStation.serialNumber', object.sn, true);
-                                    });
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.extended.cleaningStation.firmwareVersion', 'Firmware version of the cleaning station',
-                                        'string', 'value', false, object.wkVer, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.extended.cleaningStation.firmwareVersion', object.wkVer, true);
-                                    });
-                                });
-                            });
-                        });
-
-                        vacbot.on('DusterRemind', (object) => {
-                            (async () => {
-                                await ctx.adapterProxy.createObjectNotExists(
-                                    'control.extended.cleaningClothReminder', 'Cleaning cloth reminder',
-                                    'boolean', 'value', true, false, '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('control.extended.cleaningClothReminder', Boolean(Number(object.enabled)), true);
-                                    ctx.cleaningClothReminder.enabled = Boolean(Number(object.enabled));
-                                });
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.extended.cleaningClothReminder_period', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Cleaning cloth reminder period',
-                                        'type': 'number',
-                                        'role': 'value',
-                                        'read': true,
-                                        'write': true,
-                                        'min': 15,
-                                        'max': 60,
-                                        'def': 30,
-                                        'unit': 'min',
-                                        'states': {
-                                            15: '15',
-                                            30: '30',
-                                            45: '45',
-                                            60: '60'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.cleaningClothReminder_period', Number(object.period), true);
-                                ctx.cleaningClothReminder.period = Number(object.period);
-                            })();
-                        });
-
-                        vacbot.on('WaterBoxMoppingType', (value) => {
-                            (async () => {
-                                await this.handleWaterBoxMoppingType(ctx, value);
-                            })();
-                        });
-
-                        vacbot.on('WaterBoxScrubbingType', (value) => {
-                            (async () => {
-                                await this.handleWaterBoxScrubbingType(ctx, value);
-                            })();
-                        });
-
-                        vacbot.on('WashInfo', (value) => {
-                            if (value === undefined || value === null) return;
-                            ctx.adapterProxy.createObjectNotExists(
-                                'info.extended.washInfo', 'Wash mode of the cleaning station',
-                                'number', 'value', false, 0, '').then(() => {
-                                ctx.adapterProxy.setStateConditional('info.extended.washInfo', value, true);
-                            });
-                        });
-
-                        vacbot.on('DustCaseInfo', (value) => {
-                            const dustCaseInfo = Boolean(Number(value));
-                            (async () => {
-                                const state = await ctx.adapterProxy.getStateAsync('info.dustbox');
-                                if (state) {
-                                    if ((state.val !== dustCaseInfo) && (dustCaseInfo === false)) {
-                                        this.setHistoryValuesForDustboxRemoval(ctx);
-                                    }
-                                    ctx.adapterProxy.setStateConditional('info.dustbox', dustCaseInfo, true);
-                                }
-                            })();
-                        });
-
-                        vacbot.on('SleepStatus', (value) => {
-                            const sleepStatus = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('info.sleepStatus', sleepStatus, true);
-                        });
-
-                        vacbot.on('CleanSpeed', (level) => {
-                            ctx.cleanSpeed = level;
-                            adapterObjects.createControlCleanSpeedIfNotExists(this, ctx, 0, 'control.cleanSpeed_standard', 'Clean speed if no other value is set').then(() => {
-                                adapterObjects.createControlCleanSpeedIfNotExists(this, ctx, ctx.cleanSpeed).then(() => {
-                                    ctx.adapterProxy.setStateConditional('control.cleanSpeed', ctx.cleanSpeed, true);
-                                });
-                            });
-                        });
-
-                        vacbot.on('DoNotDisturbEnabled', (value) => {
-                            const doNotDisturb = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('control.extended.doNotDisturb', doNotDisturb, true);
-                        });
-
-                        vacbot.on('ContinuousCleaningEnabled', (value) => {
-                            const continuousCleaning = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('control.extended.continuousCleaning', continuousCleaning, true);
-                        });
-
-                        vacbot.on('AdvancedMode', (value) => {
-                            const advancedMode = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('control.extended.advancedMode', advancedMode, true);
-                        });
-
-                        vacbot.on('TrueDetect', (value) => {
-                            const trueDetect = Boolean(Number(value));
-                            ctx.adapterProxy.setStateConditional('control.extended.trueDetect', trueDetect, true);
-                        });
-
-                        vacbot.on('AutoEmptyStatus', (autoEmptyStatus) => {
-                            const autoEmptyEnabled = autoEmptyStatus.autoEmptyEnabled;
-                            ctx.adapterProxy.setStateConditional('control.extended.autoEmpty', autoEmptyEnabled, true);
-                            ctx.adapterProxy.setStateConditional('info.autoEmptyStation.autoEmptyEnabled', autoEmptyEnabled, true);
-                            const stationActive = autoEmptyStatus.stationActive;
-                            ctx.adapterProxy.setStateConditional('info.autoEmptyStation.stationActive', stationActive, true);
-                            const dustBagFull = autoEmptyStatus.dustBagFull;
-                            ctx.adapterProxy.setStateConditional('info.autoEmptyStation.dustBagFull', dustBagFull, true);
-                            if (stationActive) {
-                                this.setHistoryValuesForDustboxRemoval(ctx);
-                            }
-                        });
-
-                        vacbot.on('ChargeMode', (value) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'info.chargemode', 'Charge mode',
-                                'string', 'value', false, '', '').then(() => {
-                                ctx.adapterProxy.setStateConditional('info.chargemode', value, true);
-                            });
-                        });
-
-                        vacbot.on('Volume', (value) => {
-                            ctx.adapterProxy.setStateConditional('control.extended.volume', Number(value), true);
-                        });
-
-                        vacbot.on('CleanCount', (value) => {
-                            ctx.adapterProxy.setStateConditional('control.extended.cleanCount', Number(value), true);
-                        });
-
-                        vacbot.on('BatteryInfo', (value) => {
-                            ctx.getDevice().setBatteryLevel(Number(value));
-                            ctx.adapterProxy.setStateConditional('info.battery', ctx.getDevice().batteryLevel, true);
-                        });
-
-                        vacbot.on('LifeSpan_filter', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.filter', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan_main_brush', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.main_brush', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan_side_brush', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.side_brush', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan_unit_care', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.unit_care', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan_round_mop', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.round_mop', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan_air_freshener', (level) => {
-                            ctx.adapterProxy.setStateConditional('consumable.airFreshener', Math.round(level), true);
-                        });
-
-                        vacbot.on('LifeSpan', (object) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.filter', 'Filter life span',
-                                'number', 'level', false, Math.round(object.filter), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.filter', Math.round(object.filter), true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.uv_sanitizer_module', 'Filter UV Sanitizer Module',
-                                'number', 'level', false, Math.round(object.uv_sanitizer_module), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.uv_sanitizer_module', Math.round(object.uv_sanitizer_module), true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.air_freshener', 'Filter Air Freshener',
-                                'number', 'level', false, Math.round(object.air_freshener), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.air_freshener', Math.round(object.air_freshener), true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.unit_care', 'Filter Unit Care',
-                                'number', 'level', false, Math.round(object.unit_care), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.unit_care', Math.round(object.unit_care), true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.humidification_filter', 'Filter Humidification Filter',
-                                'number', 'level', false, Math.round(object.humidification_filter), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.humidification_filter', Math.round(object.humidification_filter), true);
-                            });
-                            ctx.adapterProxy.createObjectNotExists(
-                                'consumable.humidification_maintenance', 'Filter Humidification Module Maintenance',
-                                'number', 'level', false, Math.round(object.humidification_maintenance), '%').then(() => {
-                                ctx.adapterProxy.setStateConditional('consumable.humidification_maintenance', Math.round(object.humidification_maintenance), true);
-                            });
-                        });
-
-                        vacbot.on('Evt', (obj) => {
-                            this.log.debug('Evt message received');
-                            // Any event from the device means it's reachable
-                            this.handleDeviceDataReceived(ctx);
-                        });
-
-                        vacbot.on('LastError', (obj) => {
-                            if (ctx.errorCode !== obj.code) {
-                                const nick = ctx.vacuum.nick || ctx.deviceId;
-                                const model = ctx.getModel().getProductName();
-                                if (obj.code === '110') {
-                                    this.addToLast20Errors(ctx, obj.code, obj.error);
-                                    if (ctx.getModel().isSupportedFeature('info.dustbox')) {
-                                        this.setHistoryValuesForDustboxRemoval(ctx);
-                                    }
-                                } else if (obj.code === '0') {
-                                    if (ctx.unreachableWarningSent) {
-                                        this.log.info(`[${nick} (${model})] Robot is reachable again`);
-                                        ctx.unreachableWarningSent = false;
-                                    }
-                                    this.clearUnreachableRetry(ctx);
-                                    if (ctx.connected === false) {
-                                        ctx.connected = true;
-                                        this.updateDeviceConnectionState(ctx, true);
-                                        this.setConnection(true);
-                                    }
-                                    this.resetErrorStates(ctx);
-                                } else if (obj.error && obj.error.includes('NODE_MODULE_VERSION') && obj.error.includes('canvas')) {
-                                    this.log.warn(obj.error);
-                                } else {
-                                    this.addToLast20Errors(ctx, obj.code, obj.error);
-
-                                    // Global MQTT server offline detection
-                                    // When the MQTT server itself is unreachable, ALL devices are affected.
-                                    // Mark all devices unreachable globally with a single log message.
-                                    if (obj.error && obj.error.includes('MQTT server is offline or not reachable')) {
-                                        this.setGlobalMqttUnreachable(ctx);
-                                        this.debouncedSetError(ctx, obj.code, obj.error);
-                                        return; // handled globally, skip per-device processing below
-                                    }
-
-                                    // Track consecutive command failures for non-connection errors.
-                                    // If 2+ commands fail in succession, the robot likely became unreachable.
-                                    this.incrementCommandFailedCount(ctx);
-
-                                    if (!ctx.unreachableWarningSent) {
-                                        this.log.warn(`[${nick} (${model})] ${obj.error}`);
-                                        ctx.unreachableWarningSent = true;
-                                    } else {
-                                        this.log.debug(`[${nick} (${model})] ${obj.error}`);
-                                    }
-                                    if (obj.code === '404') {
-                                        this.setConnection(false);
-                                    }
-                                    ctx.connectionFailed = true;
-                                    this.scheduleUnreachableRetry(ctx);
-                                }
-                                this.debouncedSetError(ctx, obj.code, obj.error);
-                            }
-                        });
-
-                        vacbot.on('Debug', (value) => {
-                            ctx.adapterProxy.setStateConditional('info.library.debugMessage', value, true);
-                        });
-
-                        vacbot.on('Schedule', (obj) => {
-                            (async () => {
-                                await this.createInfoExtendedChannelNotExists(ctx);
-                                await ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.currentSchedule', 'Scheduling information (read-only)',
-                                    'json', 'json', false, '[]', '');
-                                await ctx.adapterProxy.setStateConditionalAsync('info.extended.currentSchedule', JSON.stringify(obj), true);
-                                await ctx.adapterProxy.createObjectNotExists(
-                                    'info.extended.currentSchedule_refresh', 'Refresh scheduling information',
-                                    'boolean', 'button', true, false, '');
-                            })();
-                        });
-
-                        vacbot.on('NetworkInfo', (obj) => {
-                            ctx.adapterProxy.setStateConditional('info.network.ip', obj.ip, true);
-                            ctx.adapterProxy.setStateConditional('info.network.wifiSSID', obj.wifiSSID, true);
-                            if (ctx.getModel().isSupportedFeature('info.network.wifiSignal')) {
-                                ctx.adapterProxy.setStateConditional('info.network.wifiSignal', Number(obj.wifiSignal), true);
-                            }
-                            if (ctx.getModel().isSupportedFeature('info.network.mac')) {
-                                ctx.adapterProxy.setStateConditional('info.network.mac', obj.mac, true);
-                            }
-                        });
-
-                        vacbot.on('RelocationState', (relocationState) => {
-                            if ((relocationState !== ctx.relocationState) && (relocationState === 'required')) {
-                                ctx.currentSpotAreaData = {
-                                    'spotAreaID': 'unknown',
-                                    'lastTimeEnteredTimestamp': 0
-                                };
-                            }
-                            ctx.adapterProxy.setStateConditional('map.relocationState', relocationState, true);
-                            ctx.relocationState = relocationState;
-                        });
-
-                        vacbot.on('Position', (obj) => {
-                            // Throttle: process position updates at most once every 2 seconds
-                            // to avoid excessive state writes and area checks during active cleaning
-                            const now = Date.now();
-                            if (ctx._lastPositionTime && (now - ctx._lastPositionTime < 2000)) {
-                                // Still update the cached raw position values (cheap, no DB writes)
-                                // so they're available when the throttled update fires
-                                ctx._pendingPosition = obj;
-                                return;
-                            }
-                            ctx._lastPositionTime = now;
-                            const posObj = ctx._pendingPosition || obj;
-                            ctx._pendingPosition = null;
-                            (async () => {
-                                await this.handlePositionObj(ctx, posObj);
-                            })();
-                        });
-
-                        vacbot.on('ChargingPosition', (obj) => {
-                            ctx.chargePosition = obj.coords;
-                            ctx.adapterProxy.setStateConditional('map.chargePosition', ctx.chargePosition, true);
-                        });
-
-                        vacbot.on('CurrentMapName', (value) => {
-                            ctx.adapterProxy.setStateConditional('map.currentMapName', value, true);
-                        });
-
-                        vacbot.on('CurrentMapIndex', (value) => {
-                            ctx.adapterProxy.setStateConditional('map.currentMapIndex', value, true);
-                        });
-
-                        vacbot.on('CurrentMapMID', (value) => {
-                            ctx.currentMapID = value.toString();
-                            ctx.adapterProxy.setStateConditional('map.currentMapMID', ctx.currentMapID, true);
-                        });
-
-                        vacbot.on('Maps', (maps) => {
-                            this.log.debug('Maps received');
-                            (async () => {
-                                await mapObjects.processMaps(this, ctx, maps);
-                            })();
-                        });
-
-                        vacbot.on('MapSpotAreas', (areas) => {
-                            this.log.debug('SpotAreas received');
-                            (async () => {
-                                await mapObjects.processSpotAreas(this, ctx, areas);
-                            })();
-                        });
-
-                        vacbot.on('MapSpotAreaInfo', (area) => {
-                            this.log.debug('SpotAreaInfo received');
-                            (async () => {
-                                await mapObjects.processSpotAreaInfo(this, ctx, area);
-                            })();
-                        });
-
-                        vacbot.on('MapVirtualBoundaries', (boundaries) => {
-                            this.log.debug('VirtualBoundaries received');
-                            (async () => {
-                                await mapObjects.processVirtualBoundaries(this, ctx, boundaries);
-                            })();
-                        });
-
-                        vacbot.on('MapVirtualBoundaryInfo', (boundary) => {
-                            this.log.debug('VirtualBoundaryInfo received');
-                            (async () => {
-                                await mapObjects.processVirtualBoundaryInfo(this, ctx, boundary);
-                            })();
-                        });
-
-                        vacbot.on('MapImage', (object) => {
-                            ctx.adapterProxy.setStateConditional('map.' + object['mapID'] + '.map64', object['mapBase64PNG'], true);
-                            ctx.adapterProxy.setStateConditional('history.timestampOfLastMapImageReceived', helper.getUnixTimestamp(), true);
-                            ctx.adapterProxy.setStateConditional('history.dateOfLastMapImageReceived', this.getCurrentDateAndTimeFormatted(), true);
-                            const base64Data = object['mapBase64PNG'].replace(/^data:image\/png;base64,/, '');
-                            (async () => {
-                                const buf = Buffer.from(base64Data, 'base64');
-                                const filename = 'currentCleaningMapImage_' + object['mapID'] + '.png';
-                                await this.writeFileAsync(this.namespace, filename, buf);
-                            })();
-                        });
-
-                        vacbot.on('CurrentCustomAreaValues', (values) => {
-                            if (((ctx.cleanstatus === 'custom_area') && (values !== '')) || (ctx.cleanstatus !== 'custom_area')) {
-                                ctx.adapterProxy.setStateConditional('map.currentUsedCustomAreaValues', values, true);
-                            }
-                        });
-
-                        vacbot.on('CurrentSpotAreas', (values) => {
-                            if (((ctx.cleanstatus === 'spot_area') && (values !== '')) || (ctx.cleanstatus !== 'spot_area')) {
-                                ctx.adapterProxy.setStateConditional('map.currentUsedSpotAreas', values, true);
-                            }
-                        });
-
-                        vacbot.on('LastUsedAreaValues', (values) => {
-                            const dateTime = this.getCurrentDateAndTimeFormatted();
-                            let customAreaValues = values;
-                            if (customAreaValues.endsWith(';')) {
-                                customAreaValues = customAreaValues.slice(0, -1);
-                            }
-                            if (helper.singleAreaValueStringIsValid(values)) {
-                                customAreaValues = values.split(',', 4).map(
-                                    function (element) {
-                                        return Number(parseInt(element).toFixed(0));
-                                    }
-                                ).toString();
-                            }
-                            ctx.adapterProxy.setStateConditional(
-                                'map.lastUsedCustomAreaValues',
-                                customAreaValues, true, {
-                                    dateTime: dateTime,
-                                    currentMapID: ctx.currentMapID
-                                });
-                        });
-
-                        vacbot.on('CleanSum', (obj) => {
-                            ctx.adapterProxy.setStateConditional('cleaninglog.totalSquareMeters', Number(obj.totalSquareMeters), true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.totalSeconds', Number(obj.totalSeconds), true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.totalTime', helper.getTimeStringFormatted(obj.totalSeconds), true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.totalNumber', Number(obj.totalNumber), true);
-                        });
-
-                        vacbot.on('CleanLog', (json) => {
-                            this.log.debug('CleanLog received');
-                            (async () => {
-                                const state = await ctx.adapterProxy.getStateAsync('cleaninglog.last20Logs');
-                                if (state) {
-                                    ctx.cleaningLogAcknowledged = true;
-                                    if (state.val !== JSON.stringify(json)) {
-                                        await ctx.adapterProxy.setStateConditionalAsync('cleaninglog.last20Logs', JSON.stringify(json), true);
-                                    }
-                                }
-                            })();
-                        });
-
-                        vacbot.on('LastCleanLogs', (obj) => {
-                            this.log.debug('LastCleanLogs: ' + JSON.stringify(obj));
-                            ctx.adapterProxy.setStateConditional('cleaninglog.lastCleaningTimestamp', Number(obj.timestamp), true);
-                            const lastCleaningDate = this.formatDate(new Date(obj.timestamp * 1000), 'TT.MM.JJJJ SS:mm:ss');
-                            ctx.adapterProxy.setStateConditional('cleaninglog.lastCleaningDate', lastCleaningDate, true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.lastTotalSeconds', obj.totalTime, true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.lastTotalTimeString', obj.totalTimeFormatted, true);
-                            ctx.adapterProxy.setStateConditional('cleaninglog.lastSquareMeters', Number(obj.squareMeters), true);
-                            if (obj.imageUrl) {
-                                ctx.adapterProxy.setStateConditional('cleaninglog.lastCleaningMapImageURL', obj.imageUrl, true);
-                                const configValue = Number(this.getConfigValue('feature.cleaninglog.downloadLastCleaningMapImage'));
-                                if (configValue >= 1) {
-                                    if (ctx.getModel().isSupportedFeature('cleaninglog.lastCleaningMap')) {
-                                        this.downloadLastCleaningMapImage(ctx, obj.imageUrl, configValue);
-                                    }
-                                }
-                            }
-                        });
-
-                        vacbot.on('CurrentStats', (obj) => {
-                            if ((obj.cleanedArea !== undefined) && (obj.cleanedSeconds !== undefined)) {
-                                if (ctx.getModel().isSupportedFeature('cleaninglog.channel')) {
-                                    if (ctx.getDevice().isNotCharging()) {
-                                        (async () => {
-                                            if (ctx.getModel().isSupportedFeature('info.dustbox') && (ctx.currentCleanedArea > 0)) {
-                                                let diff = obj.cleanedArea - ctx.currentCleanedArea;
-                                                if (diff > 0) {
-                                                    const squareMetersSinceLastDustboxRemoved = await ctx.adapterProxy.getStateAsync('history.squareMetersSinceLastDustboxRemoved');
-                                                    if (squareMetersSinceLastDustboxRemoved) {
-                                                        const squareMeters = Number(squareMetersSinceLastDustboxRemoved.val) + diff;
-                                                        await ctx.adapterProxy.setStateConditionalAsync('history.squareMetersSinceLastDustboxRemoved', squareMeters, true);
-                                                    }
-                                                }
-                                                diff = obj.cleanedSeconds - ctx.currentCleanedSeconds;
-                                                if (diff > 0) {
-                                                    const cleaningTimeSinceLastDustboxRemoved = await ctx.adapterProxy.getStateAsync('history.cleaningTimeSinceLastDustboxRemoved');
-                                                    if (cleaningTimeSinceLastDustboxRemoved) {
-                                                        const cleaningTime = Number(cleaningTimeSinceLastDustboxRemoved.val) + diff;
-                                                        await ctx.adapterProxy.setStateConditionalAsync('history.cleaningTimeSinceLastDustboxRemoved', cleaningTime, true);
-                                                        await ctx.adapterProxy.setStateConditionalAsync('history.cleaningTimeSinceLastDustboxRemovedString', helper.getTimeStringFormatted(cleaningTime), true);
-                                                        const hoursUntilDustBagEmptyReminder = this.getHoursUntilDustBagEmptyReminderFlagIsSet();
-                                                        if (hoursUntilDustBagEmptyReminder > 0) {
-                                                            const hoursSinceLastDustboxRemoved = Math.floor(cleaningTime / 3600);
-                                                            const reminderValue = (hoursSinceLastDustboxRemoved >= hoursUntilDustBagEmptyReminder);
-                                                            await ctx.adapterProxy.setStateConditionalAsync('info.extended.dustBagEmptyReminder', reminderValue, true);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            ctx.currentCleanedArea = obj.cleanedArea;
-                                            await ctx.adapterProxy.setStateConditionalAsync('cleaninglog.current.cleanedArea', obj.cleanedArea, true);
-                                            ctx.currentCleanedSeconds = obj.cleanedSeconds;
-                                            await ctx.adapterProxy.setStateConditionalAsync('cleaninglog.current.cleanedSeconds', obj.cleanedSeconds, true);
-                                            await ctx.adapterProxy.setStateConditionalAsync('cleaninglog.current.cleanedTime', helper.getTimeStringFormatted(obj.cleanedSeconds), true);
-                                            if (obj.cleanType) {
-                                                await ctx.adapterProxy.setStateConditionalAsync('cleaninglog.current.cleanType', obj.cleanType, true);
-                                            }
-                                        })();
-                                    }
-                                }
-                            }
-                        });
-
-                        vacbot.on('HeaderInfo', (obj) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'info.firmwareVersion', 'Firmware version',
-                                'string', 'value', false, '', '').then(() => {
-                                ctx.adapterProxy.setStateConditional('info.firmwareVersion', obj.fwVer, true);
-                            });
-                        });
+                    eventHandlers.registerReadyEvent(this, vacbot, ctx, vacuum);
+
+                        eventHandlers.registerChargeStateEvent(this, vacbot, ctx);
+
+                        eventHandlers.registerCleanReportEvent(this, vacbot, ctx);
+
+                        eventHandlers.registerWaterCleaningEvents(this, vacbot, ctx);
+                        eventHandlers.registerStationEvents(this, vacbot, ctx);
+
+                        eventHandlers.registerMiscEventHandlers(this, vacbot, ctx);
+                        eventHandlers.registerConsumableEvents(this, vacbot, ctx);
+                        eventHandlers.registerConnectionEvents(this, vacbot, ctx);
+                        eventHandlers.registerMapEvents(this, vacbot, ctx);
+                        eventHandlers.registerAirbotEvents(this, vacbot, ctx);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
                         // ==================================
                         // OTA / Firmware Update Status
                         // ==================================
 
-                        vacbot.on('Ota', (object) => {
-                            ctx.adapterProxy.createChannelNotExists('info.ota', 'Firmware Update (OTA) Information').then(() => {
-                            // OTA status
-                                if (Object.prototype.hasOwnProperty.call(object, 'status')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.status', 'Update status',
-                                        'string', 'value', false, '', '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.status', object.status, true);
-                                    });
-                                }
-                                // OTA progress
-                                if (Object.prototype.hasOwnProperty.call(object, 'progress')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.progress', 'Update progress',
-                                        'number', 'value', false, 0, '%').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.progress', object.progress, true);
-                                    });
-                                }
-                                // OTA version (target firmware version)
-                                if (Object.prototype.hasOwnProperty.call(object, 'ver')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.version', 'Available firmware version',
-                                        'string', 'value', false, '', '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.version', object.ver, true);
-                                    });
-                                }
-                                // OTA result
-                                if (Object.prototype.hasOwnProperty.call(object, 'result')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.result', 'Update result',
-                                        'number', 'value', false, 0, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.result', Number(object.result), true);
-                                    });
-                                }
-                                // OTA supportAuto
-                                if (Object.prototype.hasOwnProperty.call(object, 'supportAuto')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.supportsAutoUpdate', 'Device supports automatic updates',
-                                        'boolean', 'value', false, false, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.supportsAutoUpdate', Boolean(object.supportAuto), true);
-                                    });
-                                }
-                                // OTA isForce (forced update)
-                                if (Object.prototype.hasOwnProperty.call(object, 'isForce')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.ota.isForced', 'Update is mandatory',
-                                        'boolean', 'value', false, false, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.ota.isForced', Boolean(object.isForce), true);
-                                    });
-                                }
-                                // OTA autoSwitch (auto-update enabled) - control state
-                                if (Object.prototype.hasOwnProperty.call(object, 'autoSwitch')) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'control.ota.autoUpdate', 'Enable automatic firmware updates',
-                                        'boolean', 'switch', true, false, '').then(() => {
-                                        ctx.adapterProxy.setStateConditional('control.ota.autoUpdate', Boolean(object.autoSwitch), true);
-                                    });
-                                }
-                            });
-                        });
 
                         /**
                      * @deprecated
@@ -1278,345 +387,22 @@ class EcovacsDeebot extends utils.Adapter {
                         // AIRBOT Z1 / Z1 Air Quality Monitor
                         // ==================================
 
-                        vacbot.on('BlueSpeaker', (object) => {
-                            const enable = object['enable'];
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.bluetoothSpeaker', 'Bluetooth Speaker',
-                                'boolean', 'value', true, Boolean(enable), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.bluetoothSpeaker', Boolean(enable), true);
-                            });
-                        });
 
-                        vacbot.on('Mic', (value) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.microphone', 'Microphone',
-                                'boolean', 'value', true, Boolean(value), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.microphone', Boolean(value), true);
-                            });
-                        });
 
-                        vacbot.on('VoiceSimple', (value) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.extended.voiceReport', 'Working Status Voice Report',
-                                'boolean', 'value', true, Boolean(value), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.extended.voiceReport', Boolean(value), true);
-                            });
-                        });
 
-                        vacbot.on('ThreeModuleStatus', (array) => {
-                            ctx.adapterProxy.createChannelNotExists('info.airPurifierModules', 'Air Purifier Modules (Airbot models)').then(() => {
-                                const modules = [];
-                                modules['uvLight'] = {
-                                    id: 'uvSanitization',
-                                    name: 'UV Sanitizing Filter'
-                                };
-                                modules['smell'] = {
-                                    id: 'airFreshening',
-                                    name: 'Air Freshener Module'
-                                };
-                                modules['humidify'] = {
-                                    id: 'humidification',
-                                    name: 'Fog-free Humidification Module'
-                                };
-                                for (const element of array) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.airPurifierModules.' + modules[element.type].id, modules[element.type].name,
-                                        'string', 'value', false, '', '').then(() => {
-                                        let status = 'not installed';
-                                        if (element.state === 1) {
-                                            status = element.work ? 'active' : 'idle';
-                                        }
-                                        ctx.adapterProxy.setStateConditional('info.airPurifierModules.' + modules[element.type].id, status, true);
-                                    });
-                                }
-                            });
-                        });
 
-                        vacbot.on('AirQuality', (object) => {
-                            ctx.adapterProxy.createChannelNotExists('info.airQuality', 'Air quality (Airbot models)').then(() => {
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.airQuality.particulateMatter10', 'Particulate Matter 10 (PM10)',
-                                    'number', 'value', false, 0, 'μg/m3').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.airQuality.particulateMatter10', object.particulateMatter10, true);
-                                });
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.airQuality.particulateMatter25', 'Particulate Matter 25 (PM25)',
-                                    'number', 'value', false, 0, 'μg/m3').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.airQuality.particulateMatter25', object.particulateMatter25, true);
-                                });
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.airQuality.airQualityIndex', 'Air Quality Index',
-                                    'number', 'value', false, 0, '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.airQuality.airQualityIndex', object.airQualityIndex, true);
-                                });
-                                ctx.adapterProxy.createObjectNotExists(
-                                    'info.airQuality.volatileOrganicCompounds', 'Volatile Organic Compounds Index',
-                                    'number', 'value', false, 0, '').then(() => {
-                                    ctx.adapterProxy.setStateConditional('info.airQuality.volatileOrganicCompounds', object.volatileOrganicCompounds, true);
-                                });
-                                if (object['volatileOrganicCompounds_parts'] !== undefined) {
-                                    ctx.adapterProxy.createObjectNotExists(
-                                        'info.airQuality.volatileOrganicCompounds_parts', 'Volatile Organic Compounds (parts per billion)',
-                                        'number', 'value', false, 0, 'ppb').then(() => {
-                                        ctx.adapterProxy.setStateConditional('info.airQuality.volatileOrganicCompounds_parts', object['volatileOrganicCompounds_parts'], true);
-                                    });
-                                }
-                                (async () => {
-                                    let state;
-                                    let temperatureOffset = 0;
-                                    state = await ctx.adapterProxy.getStateAsync('info.airQuality.offset.temperature');
-                                    if (state) {
-                                        temperatureOffset = Number(Number(state.val).toFixed(1));
-                                    }
-                                    let humidityOffset = 0;
-                                    state = await ctx.adapterProxy.getStateAsync('info.airQuality.offset.humidity');
-                                    if (state) {
-                                        humidityOffset = Number(Number(state.val).toFixed(0));
-                                    }
-                                    await ctx.adapterProxy.createChannelNotExists('info.airQuality.offset', 'Offset values');
-                                    await ctx.adapterProxy.createObjectNotExists(
-                                        'info.airQuality.offset.temperature', 'Temperature offset',
-                                        'number', 'value', true, temperatureOffset);
-                                    await ctx.adapterProxy.setStateConditionalAsync(
-                                        'info.airQuality.offset.temperature', temperatureOffset, true);
-                                    await ctx.adapterProxy.createObjectNotExists(
-                                        'info.airQuality.offset.humidity', 'Humidity offset',
-                                        'number', 'value', true, humidityOffset);
-                                    await ctx.adapterProxy.setStateConditionalAsync(
-                                        'info.airQuality.offset.humidity', humidityOffset, true);
-                                    const temperature = object.temperature + temperatureOffset;
-                                    const humidity = object.humidity + humidityOffset;
-                                    await ctx.adapterProxy.createObjectNotExists(
-                                        'info.airQuality.temperature', 'Temperature',
-                                        'number', 'value', false, 0, '°C');
-                                    await ctx.adapterProxy.setStateConditionalAsync(
-                                        'info.airQuality.temperature', temperature, true);
-                                    await ctx.adapterProxy.createObjectNotExists(
-                                        'info.airQuality.humidity', 'Humidity',
-                                        'number', 'value', false, 0, '%');
-                                    await ctx.adapterProxy.setStateConditionalAsync(
-                                        'info.airQuality.humidity', humidity, true);
-                                })();
-                            });
-                        });
 
-                        vacbot.on('AtmoLight', (value) => {
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.extended.atmoLight', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Light brightness',
-                                        'type': 'number',
-                                        'role': 'value',
-                                        'read': true,
-                                        'write': true,
-                                        'min': 0,
-                                        'max': 4,
-                                        'def': 2,
-                                        'unit': '',
-                                        'states': {
-                                            0: '0',
-                                            1: '1',
-                                            2: '2',
-                                            3: '3',
-                                            4: '4'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.atmoLight', Number(value), true);
-                            })();
-                        });
 
-                        vacbot.on('AtmoVolume', (value) => {
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.extended.atmoVolume', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Volume for voice and sounds (0-16)',
-                                        'type': 'number',
-                                        'role': 'value',
-                                        'read': true,
-                                        'write': true,
-                                        'min': 0,
-                                        'max': 4,
-                                        'def': 2,
-                                        'unit': '',
-                                        'states': {
-                                            0: '0',
-                                            1: '1',
-                                            2: '2',
-                                            3: '3',
-                                            4: '4',
-                                            5: '5',
-                                            6: '6',
-                                            7: '7',
-                                            8: '8',
-                                            9: '9',
-                                            10: '10',
-                                            11: '11',
-                                            12: '12',
-                                            13: '13',
-                                            14: '14',
-                                            15: '15',
-                                            16: '16'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.extended.atmoVolume', Number(value), true);
-                            })();
-                        });
 
-                        vacbot.on('AutonomousClean', (value) => {
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.linkedPurification.selfLinkedPurification', 'Self-linked Purification',
-                                'boolean', 'value', true, Boolean(value), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.linkedPurification.selfLinkedPurification', Boolean(value), true);
-                            });
-                        });
 
-                        vacbot.on('AirbotAutoModel', (object) => {
-                            const enabled = object['enable'];
-                            const aqEnd = enabled ? object['aq']['aqEnd'] : 2;
-                            const aqStart = enabled ? object['aq']['aqStart'] : 3;
-                            const value = [enabled, aqStart, aqEnd].join(',');
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.linkedPurification.linkedPurificationAQ', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Linked Purification (linked to Air Quality Monitor)',
-                                        'type': 'mixed',
-                                        'role': 'level',
-                                        'read': true,
-                                        'write': true,
-                                        'def': value,
-                                        'unit': '',
-                                        'states': {
-                                            '0,3,2': 'disabled',
-                                            '1,4,3': 'very poor <> poor',
-                                            '1,4,2': 'very poor <> fair',
-                                            '1,4,1': 'very poor <> good',
-                                            '1,3,2': 'poor <> fair',
-                                            '1,3,1': 'poor <> good',
-                                            '1,2,1': 'fair <> good'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.linkedPurification.linkedPurificationAQ', value, true);
-                            })();
-                        });
 
-                        vacbot.on('ThreeModule', (object) => {
-                            const modules = [];
-                            object.forEach((module) => {
-                                modules[module['type']] = module;
-                            });
-                            const uvSanitization = modules['uvLight']['enable'];
-                            ctx.adapterProxy.createObjectNotExists(
-                                'control.airPurifierModules.uvSanitization', 'Sanitization (UV-Sanitizer)',
-                                'boolean', 'value', true, Boolean(uvSanitization), '').then(() => {
-                                ctx.adapterProxy.setStateConditional('control.airPurifierModules.uvSanitization', Boolean(uvSanitization), true);
-                            });
-                            let airFresheningLevel = modules['smell']['level'];
-                            if (modules['smell']['enable'] === 0) airFresheningLevel = 0;
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.airPurifierModules.airFreshening', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Air Freshening',
-                                        'type': 'number',
-                                        'role': 'level',
-                                        'read': true,
-                                        'write': true,
-                                        'def': airFresheningLevel,
-                                        'unit': '',
-                                        'states': {
-                                            0: 'disabled',
-                                            1: 'light',
-                                            2: 'standard',
-                                            3: 'strong'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.airPurifierModules.airFreshening', airFresheningLevel, true);
-                            })();
-                            let humidificationLevel = modules['humidify']['level'];
-                            if (modules['humidify']['enable'] === 0) humidificationLevel = 0;
-                            (async () => {
-                                await ctx.adapterProxy.setObjectNotExistsAsync('control.airPurifierModules.humidification', {
-                                    'type': 'state',
-                                    'common': {
-                                        'name': 'Humidification',
-                                        'type': 'number',
-                                        'role': 'level',
-                                        'read': true,
-                                        'write': true,
-                                        'def': humidificationLevel,
-                                        'unit': '',
-                                        'states': {
-                                            0: 'disabled',
-                                            45: 'lower humidity',
-                                            55: 'cozy',
-                                            65: 'higher humidity'
-                                        }
-                                    },
-                                    'native': {}
-                                });
-                                await ctx.adapterProxy.setStateConditionalAsync('control.airPurifierModules.humidification', humidificationLevel, true);
-                            })();
-                        });
 
                         // ==================
                         // Library connection
                         // ==================
 
-                        vacbot.on('messageReceived', (value) => {
-                            this.log.silly('Received message: ' + value);
-                            const timestamp = helper.getUnixTimestamp();
-                            ctx.adapterProxy.setStateConditional('history.timestampOfLastMessageReceived', timestamp, true);
-                            // Throttle formatted date updates: only update every 60 seconds to reduce DB writes
-                            if (!ctx._lastFormattedDateUpdate || (timestamp - ctx._lastFormattedDateUpdate >= 60)) {
-                                ctx._lastFormattedDateUpdate = timestamp;
-                                ctx.adapterProxy.setStateConditional('history.dateOfLastMessageReceived', this.getCurrentDateAndTimeFormatted(), true);
-                            }
-                            if (ctx.connectedTimestamp > 0) {
-                                const uptime = Math.floor((timestamp - ctx.connectedTimestamp) / 60);
-                                // Only write uptime when it changes (minute-level precision)
-                                if (uptime !== ctx._lastUptimeValue) {
-                                    ctx._lastUptimeValue = uptime;
-                                    ctx.adapterProxy.setStateConditional('info.connectionUptime', uptime, true);
-                                }
-                            }
-                            // If device was previously unreachable, receiving any message means it's back
-                            this.handleDeviceDataReceived(ctx);
-                        });
 
-                        vacbot.on('genericCommandPayload', (payload) => {
-                            const payloadString = JSON.stringify(payload);
-                            this.log.info('Received payload for Generic command: ' + payloadString);
-                            ctx.adapterProxy.setStateConditional('control.extended.genericCommand.responsePayload', payloadString, true);
-                        });
 
-                        vacbot.on('disconnect', (error) => {
-                            const nick = ctx.vacuum.nick || ctx.deviceId;
-                            const model = ctx.getModel().getProductName();
-                            if (ctx.connected && error) {
-                                ctx.connected = false;
-                                this.updateDeviceConnectionState(ctx, false);
-                                this.updateConnectionState();
-                                ctx.connectionFailed = true;
-                                if (!ctx.unreachableWarningSent) {
-                                    this.log.warn(`[${nick} (${model})] Disconnected: ${error.toString()}`);
-                                    ctx.unreachableWarningSent = true;
-                                } else {
-                                    this.log.debug(`[${nick} (${model})] Disconnected: ${error.toString()}`);
-                                }
-                                this.scheduleUnreachableRetry(ctx);
-                            }
-                        });
                     });
 
                     // Skip connecting this device if MQTT server is known to be unreachable
@@ -1630,9 +416,8 @@ class EcovacsDeebot extends utils.Adapter {
                     // Start fixed-interval polling
                     this.startPolling(ctx);
                 }
-            });
             this._connecting = false;
-        }).catch((e) => {
+        } catch (e) {
             this._connecting = false;
             this.connectionFailed = true;
             if (this.isAuthError(e.message)) {
@@ -1640,11 +425,13 @@ class EcovacsDeebot extends utils.Adapter {
                 this.log.error('Authentication failed. Retrying will not be attempted until the adapter is restarted or credentials are updated.');
             }
             this.error(e.message, true);
-        });
-        } catch (e) {
-            this._connecting = false;
-            this.connectionFailed = true;
-            this.log.error('Connection initialization failed: ' + (e.message || 'Unknown error'));
+        }
+    }
+
+    _flushPendingPosition(ctx) {
+        if (ctx._pendingPosition) {
+            this.handlePositionObj(ctx, ctx._pendingPosition);
+            ctx._pendingPosition = null;
         }
     }
 
@@ -1763,7 +550,7 @@ class EcovacsDeebot extends utils.Adapter {
             return;
         }
 
-        const BACKOFF_SCHEDULE = [30000, 60000, 300000];
+        const BACKOFF_SCHEDULE = C.BACKOFF_SCHEDULE;
         const retryIndex = Math.min(this.globalMqttUnreachableCount, BACKOFF_SCHEDULE.length - 1);
         const delay = BACKOFF_SCHEDULE[retryIndex];
         this.globalMqttUnreachableCount++;
@@ -1810,7 +597,7 @@ class EcovacsDeebot extends utils.Adapter {
         ctx.commandFailedResetTimeout = setTimeout(() => {
             ctx.commandFailedCount = 0;
             ctx.commandFailedResetTimeout = null;
-        }, 60000);
+        }, C.COMMAND_FAILURE_RESET_TIMEOUT_MS);
 
         // After 2+ consecutive failures, mark device as unreachable
         if (ctx.commandFailedCount >= 2 && !ctx.connectionFailed) {
@@ -1836,7 +623,7 @@ class EcovacsDeebot extends utils.Adapter {
         if (this.authFailed) { return; }
 
         // Backoff schedule: 30s, 60s, then 5min for all subsequent retries
-        const BACKOFF_SCHEDULE = [30000, 60000, 300000];
+        const BACKOFF_SCHEDULE = C.BACKOFF_SCHEDULE;
         const retryIndex = Math.min(ctx.unreachableRetryCount, BACKOFF_SCHEDULE.length - 1);
         const delay = BACKOFF_SCHEDULE[retryIndex];
         ctx.unreachableRetryCount++;
@@ -1892,7 +679,7 @@ class EcovacsDeebot extends utils.Adapter {
 
         // Debounce: ignore if recovery was already triggered within the last 5 seconds
         const now = Date.now();
-        if (ctx._lastRecoveryTimestamp && (now - ctx._lastRecoveryTimestamp < 5000)) {
+        if (ctx._lastRecoveryTimestamp && (now - ctx._lastRecoveryTimestamp < C.RECOVERY_DEBOUNCE_MS)) {
             return;
         }
         ctx._lastRecoveryTimestamp = now;
@@ -2239,7 +1026,7 @@ class EcovacsDeebot extends utils.Adapter {
         if (ctx._autoUpdateInterval) {
             return;
         }
-        const interval = Math.max(this.pollingInterval, 60000);
+        const interval = Math.max(this.pollingInterval, C.MIN_POLLING_INTERVAL_MS);
         ctx._autoUpdateInterval = setInterval(() => {
             if (this.globalMqttUnreachable || ctx.connectionFailed || !ctx.connected) {
                 return;
@@ -2254,22 +1041,6 @@ class EcovacsDeebot extends utils.Adapter {
             clearInterval(ctx._autoUpdateInterval);
             ctx._autoUpdateInterval = null;
         }
-    }
-
-    getDevice(ctx) {
-        if (ctx.device) {
-            return ctx.device;
-        }
-        ctx.device = new Device(this);
-        return ctx.device;
-    }
-
-    getModel(ctx) {
-        if (ctx.model && ctx.model.vacbot) {
-            return ctx.model;
-        }
-        ctx.model = new Model(ctx.vacbot, this.config);
-        return ctx.model;
     }
 
     getModelType(ctx) {
@@ -2386,9 +1157,6 @@ class EcovacsDeebot extends utils.Adapter {
             this.log.error(message);
         }
         this.errorCode = '-9';
-        for (const ctx of this.deviceContexts.values()) {
-            this.addToLast20Errors(ctx, this.errorCode, message);
-        }
         this.setStateConditional('info.errorCode', this.errorCode, true);
         this.setStateConditional('info.error', message, true);
     }
@@ -2831,7 +1599,7 @@ class EcovacsDeebot extends utils.Adapter {
                                             (async () => {
                                                 await this.setAirDryingActiveTime(ctx);
                                             })();
-                                        }, 60000);
+                                        }, C.AIR_DRYING_INTERVAL_MS);
                                         this.log.debug('Set airDryingActiveInterval');
                                     });
                                 }
@@ -2857,7 +1625,7 @@ class EcovacsDeebot extends utils.Adapter {
                                     ctx.adapterProxy.setStateConditional('info.extended.airDryingDateTime.endTimestamp', 0, true);
                                     ctx.airDryingStartTimestamp = 0;
                                     this.log.debug('Reset air drying active time and timestamp states after 60 seconds');
-                                }, 60000 );
+                                }, C.AIR_DRYING_RESET_DELAY_MS);
                             });
                             this.log.info(`Air drying process finished`);
                         }
@@ -2959,6 +1727,7 @@ if (module && module.parent) {
 } else {
     new EcovacsDeebot();
 }
+
 
 
 
